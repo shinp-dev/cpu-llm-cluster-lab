@@ -204,15 +204,163 @@ Error: request (32802 tokens) exceeds the available context size (32768 tokens),
 -n 2500
 ```
 
-これにより約13k tokens以上の出力・余白を確保する方針とした。
+これにより約13k tokens以上の余白を確保した。
 
-### このPoCで得た知見
+### 長時間実行中のworker負荷
 
-- repo監査では文字数ではなくtoken数でcontext設計する必要がある
-- 大きなrepoを丸ごと1プロンプトへ入れるより、分割監査→統合の方が拡張しやすい
-- `Last Result: 0` だけではLLM内部エラーを判定できない。標準出力・エラー内容も確認すべき
-- 長時間処理はLabOpsから直接起動せずScheduled Task等へ切り離すと安定する
-- 夜間バッチ用途では対話速度よりクラスタ全体のジョブスループットが重要
+監査中にRPC workerのCPU time deltaを観測した。
+
+ある時点:
+
+```text
+R841PC025
+CPU DELTA : 92.4 sec / 10 sec
+RAM       : 約13 GiB
+
+R841PC026
+CPU DELTA : 0.0 sec / 10 sec
+RAM       : 約16.7 GiB
+```
+
+数分後:
+
+```text
+R841PC026
+CPU DELTA : 99.7 sec / 10 sec
+RAM       : 約15 GiB
+```
+
+片方が待機している瞬間があっても、数分後には別workerへ処理が移ることを確認した。瞬間CPU使用率だけでは分散失敗と判断できない。
+
+### 最初の48k監査はworker電源断で失敗
+
+数時間処理した後、親機で以下を記録。
+
+```text
+recv failed
+Remote RPC server crashed or returned malformed response
+```
+
+後から、学生がRPC worker PCをシャットダウンしていたことが判明した。
+
+これは長時間処理そのものの安定性問題ではなく、workerノードの物理的な電源断による失敗だった。
+
+この事故から、実運用では以下が必要と判断した。
+
+- worker死活監視
+- チャンク単位チェックポイント
+- 完了済み処理の再利用
+- 失敗チャンクだけ再実行
+- 別クラスタへの再割当
+
+### RPC server再起動
+
+worker再起動後、`ggml-rpc-server` は自動復旧しなかったため、SYSTEM権限のScheduled Taskから起動し直した。
+
+controllerから以下を再確認してから監査を再投入。
+
+```text
+R841PC025 : True
+R841PC026 : True
+```
+
+---
+
+## 2026-09-10〜11: 48k repo監査の完全完走
+
+### 再実行
+
+開始:
+
+```text
+2026-09-10 17:08:44
+```
+
+条件:
+
+```text
+Model      : Llama-3.3-70B-Instruct-Q4_K_M.gguf
+Context    : 49152
+Max output : 2500
+RPC        : R841PC025 + R841PC026
+Controller : R841PC000
+```
+
+翌朝確認。
+
+```text
+Status: Ready
+Last Result: 0
+llama-cli NOT RUNNING
+EXIT CODE: 0
+STDERR: empty
+```
+
+出力ファイル:
+
+```text
+C:\dev\Last_Beacon-main\AI-AUDIT.md
+Length        : 6146 bytes
+LastWriteTime : 2026-09-11 03:47:18
+```
+
+実行時間は約10時間38分。
+
+### 実測性能
+
+```text
+[ Prompt: 1.1 t/s | Generation: 0.1 t/s ]
+```
+
+短い70Bテスト時の `Generation: 0.8 t/s` と比べ、長大promptを用いたrepo監査では生成速度が大幅に低下した。
+
+### 監査品質
+
+監査自体は最後まで完走したが、結果には以下の問題があった。
+
+- 根拠の弱い事項をCriticalへ分類
+- 「設定が不明」「確認が必要」といった一般論を重大問題として扱う
+- コード固有の問題よりベストプラクティス列挙へ流れる
+- severity calibrationが不十分
+
+したがって、70Bであっても出力をそのまま自動採用するのは危険。
+
+次回は以下をpromptへ強制する。
+
+```text
+- 実コードの根拠がない指摘は禁止
+- file / symbol / evidence を必須化
+- 問題がない場合は「問題なし」とする
+- CriticalはRCE、認証突破、重大な漏えい、データ消失級に限定
+- 一般論のみの指摘は禁止
+- confidenceを付ける
+```
+
+### 現時点の結論
+
+技術的には、GPUなし・1GbE・i9-13900H級PC 3台で、約32.8k tokenの実repo入力をLlama 3.3 70B Q4_K_Mへ渡し、48k contextで最後まで処理できた。
+
+一方で、repo全体を一発投入する方式は約10時間38分を要し、出力品質も十分ではなかった。
+
+次のPoCでは、
+
+```text
+3k〜6k token chunks
+      ↓
+focused audit
+      ↓
+short structured findings
+      ↓
+checkpoint / retry
+      ↓
+aggregation
+      ↓
+final report
+```
+
+へ移行する。
+
+詳細は [Lessons Learned](lessons-learned.md) を参照。
 
 ## 次の構想
 
