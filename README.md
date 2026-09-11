@@ -55,6 +55,31 @@ Available devices:
 
 GPUなし、1GbE、i9-13900H × 3台で70Bが実際に完走しました。
 
+### 4. 実リポジトリ監査を完走
+
+`C:\dev\Last_Beacon-main` の主要21ファイルをまとめ、約32,802 tokenの入力を48k contextで監査。
+
+```text
+Start      : 2026-09-10 17:08:44
+Output end : 2026-09-11 03:47:18
+Elapsed    : 約10時間38分
+
+Prompt     : 1.1 t/s
+Generation : 0.1 t/s
+```
+
+結果Markdownの生成まで完走した。
+
+ただし、一括長文監査では以下の課題も確認。
+
+- prefillが非常に重い
+- 長文生成が遅い
+- severity判定が甘い
+- 根拠の弱い一般論が混ざる
+- worker電源断で長時間ジョブが全損する
+
+次段階では token-aware chunking / checkpoint / retry / focused audit を導入する。
+
 ## 想定用途
 
 最終的には30台程度のPCを `3台 × 10クラスタ` に分割し、夜間バッチで複数リポジトリを並列監査する構成を想定しています。
@@ -66,9 +91,11 @@ GitHub / local repository
         ↓
 10 x 70B clusters
         ↓
-source/code audit
+token-aware chunk audit
         ↓
-AUDIT.md
+structured findings
+        ↓
+final AUDIT.md
         ↓
 commit / push
 ```
@@ -80,6 +107,7 @@ commit / push
 - [セットアップ手順](docs/setup.md)
 - [実験ログ](docs/experiment-log.md)
 - [リポジトリ監査PoC](docs/repository-audit-poc.md)
+- [Lessons Learned](docs/lessons-learned.md)
 
 ## 注意
 
